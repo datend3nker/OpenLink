@@ -3,7 +3,7 @@ package tech.mmarca.openlink
 /** The constants both sides of the channel agree on. See docs/spec.md. */
 object OpenLink {
     /** The protocol this library speaks. Both sides send theirs in hello and use the lower. */
-    const val PROTOCOL_VERSION: Int = 3
+    const val PROTOCOL_VERSION: Int = 4
 
     /** The intent action a host's service answers to; the client also names the host's package. */
     const val ACTION_HOST: String = "tech.mmarca.openlink.action.HOST"
@@ -23,8 +23,18 @@ object OpenLink {
     /** The first protocol version that carries [CAPABILITY_SETTINGS]. */
     const val SETTINGS_VERSION: Int = 3
 
+    /**
+     * Version 4: the workout a client runs ([OpenLinkWorkoutPlan]), shown on the wearable that
+     * records it, and the sets marked there ([OpenLinkWorkoutResults]). It carries the
+     * exercises' names, so it is asked for on its own.
+     */
+    const val CAPABILITY_WORKOUT: String = "workout"
+
+    /** The first protocol version that carries [CAPABILITY_WORKOUT]. */
+    const val WORKOUT_VERSION: Int = 4
+
     val ALL_CAPABILITIES: Set<String> =
-        setOf(CAPABILITY_PROFILE, CAPABILITY_DEVICES, CAPABILITY_RECORDING, CAPABILITY_LIVE, CAPABILITY_SETTINGS)
+        setOf(CAPABILITY_PROFILE, CAPABILITY_DEVICES, CAPABILITY_RECORDING, CAPABILITY_LIVE, CAPABILITY_SETTINGS, CAPABILITY_WORKOUT)
 
     fun permissionFor(hostPackage: String): String = hostPackage + PERMISSION_SUFFIX
 }
@@ -59,8 +69,11 @@ enum class OpenLinkRecordingPhase {
  */
 enum class OpenLinkRecordingMode { STREAM, RECORD }
 
-/** What a device can do when it records a workout of its own (version 2). */
-enum class OpenLinkRecordingFeature { GPS, HEART_RATE, PAUSE, AUTO_PAUSE }
+/**
+ * What a device can do when it records a workout of its own (version 2). From version 4,
+ * [WORKOUT_PLAN]: it shows the client's workout plan; [WORKOUT_INPUT]: sets can be marked on it.
+ */
+enum class OpenLinkRecordingFeature { GPS, HEART_RATE, PAUSE, AUTO_PAUSE, WORKOUT_PLAN, WORKOUT_INPUT }
 
 /** What a device measures and its host writes to Health Connect (version 2). */
 enum class OpenLinkMeasurement { HEART_RATE, HRV, SPO2, SKIN_TEMPERATURE }

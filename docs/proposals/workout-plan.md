@@ -1,6 +1,10 @@
 # Proposal: the workout plan on the wearable (version 4)
 
-Status: idea, not decided, no code. It extends delegated recording (version 2) and borrows the
+Status: the plan and the results (everything but "A second screen") are built as version 4 and
+specified in `docs/spec.md`, "The workout plan"; where the two differ, the spec counts. The
+library hands a plan to the host app at once and keeps the results in memory, not in the session
+storage. "A second screen" is decided in outline (its own capability, `workout.follow`) and not
+built. It extends delegated recording (version 2) and borrows the
 settings model (version 3). Asked for by LiftLog. LiftLog runs a strength workout on the phone
 and wants the watch to show it and take sets.
 
@@ -211,8 +215,8 @@ sets.
 
 ## Open questions
 
-- Is following a workout part of `workout`, or its own capability, so that an app may send its
-  own plan without seeing other apps' workouts? Proposal: its own, `workout.follow`.
+- Decided: following a workout is its own capability, `workout.follow`, so that an app may send
+  its own plan without seeing other apps' workouts.
 
 - Does `WORKOUT_INPUT` need its own consent toggle, or is `workout` enough? Proposal: one
   capability, with the device flag deciding what is possible.

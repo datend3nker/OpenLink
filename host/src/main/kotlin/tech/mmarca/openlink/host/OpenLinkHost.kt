@@ -27,6 +27,8 @@ import tech.mmarca.openlink.OpenLinkRecordingState
 import tech.mmarca.openlink.OpenLinkSettings
 import tech.mmarca.openlink.OpenLinkState
 import tech.mmarca.openlink.OpenLinkTrust
+import tech.mmarca.openlink.OpenLinkWorkoutPlan
+import tech.mmarca.openlink.OpenLinkWorkoutResults
 
 /**
  * The host's binder and its listeners. One per process: the app builds it once (a
@@ -80,6 +82,13 @@ class OpenLinkHost(
         core.onTrustChanged = { packageName, _, after ->
             val kept = if (after?.trust == OpenLinkTrust.TRUSTED) after.capabilities else emptySet()
             endSessions(packageName, OpenLinkSessions.SESSION_CAPABILITIES - kept, OpenLinkRecordingState.REASON_HOST_STOPPED)
+            // Without the workout capability the device shows the plan no longer; the workout goes on.
+            if (OpenLink.CAPABILITY_WORKOUT !in kept) {
+                val caller = OpenLinkCaller(uid = -1, packageName = packageName, signerSha256 = "")
+                sessions.dropPlans(packageName).forEach { sessionId ->
+                    runCatching { capabilities.setWorkoutPlan(caller, sessionId, null) }.onFailure { Log.w(TAG, "dropping a plan failed", it) }
+                }
+            }
             broadcastTo(packageName) { listener, caller -> listener.onStateChanged(stateFor(caller)) }
         }
         // Stopped workouts kept through a restart wait for their end from here.
@@ -145,9 +154,15 @@ class OpenLinkHost(
                     when (start) {
                         OpenLinkStart.Begin, OpenLinkStart.Refused -> Unit
                         // A replay after a reconnect: where the workout stands, if the host app said.
-                        is OpenLinkStart.Already -> start.last?.let { tellRecording(caller.packageName, it) }
+                        is OpenLinkStart.Already -> {
+                            start.last?.let { tellRecording(caller.packageName, it) }
+                            tellMarks(caller.packageName, request.sessionId)
+                        }
                         // A replay of a recording that ended while the client was away: start nothing.
-                        is OpenLinkStart.Ended -> tellRecording(caller.packageName, start.last)
+                        is OpenLinkStart.Ended -> {
+                            tellMarks(caller.packageName, request.sessionId)
+                            tellRecording(caller.packageName, start.last)
+                        }
                         is OpenLinkStart.Failed -> tellRecording(
                             caller.packageName,
                             OpenLinkRecordingState(request.sessionId, request.deviceId.orEmpty(), OpenLinkRecordingPhase.FAILED, start.reason, System.currentTimeMillis()),
@@ -204,6 +219,19 @@ class OpenLinkHost(
             if (!valid.isEmpty) capabilities.setSettings(caller, valid)
         }
 
+        override fun setWorkoutPlan(plan: OpenLinkWorkoutPlan?) = gated(OpenLink.CAPABILITY_WORKOUT) { caller ->
+            if (core.versionOf(caller.packageName) < OpenLink.WORKOUT_VERSION) return@gated
+            val valid = plan?.valid()
+            if (valid == null) {
+                // A count, never a label.
+                Log.i(TAG, "dropped a workout plan")
+                return@gated
+            }
+            if (sessions.planned(valid.sessionId, caller.packageName, valid.revision)) {
+                capabilities.setWorkoutPlan(caller, valid.sessionId, valid)
+            }
+        }
+
         override fun getSettings(): OpenLinkSettings =
             gatedValue(OpenLink.CAPABILITY_SETTINGS, OpenLinkSettings.EMPTY) { caller ->
                 if (core.versionOf(caller.packageName) < OpenLink.SETTINGS_VERSION) {
@@ -215,6 +243,18 @@ class OpenLinkHost(
     }
 
     // --- events the host app publishes
+
+    /**
+     * Sets were marked on the wearable (version 4): the ones that changed, or all of the
+     * session's. To the session's owner, with all of the session's, if it is trusted with
+     * workout. Kept for an owner that is away, and with the workout once it ended.
+     */
+    fun publishWorkoutResults(results: OpenLinkWorkoutResults) {
+        synchronized(recordingLock) {
+            val (owner, all) = sessions.marked(results.valid()) ?: return
+            tellResults(owner, all)
+        }
+    }
 
     fun publishProfile(profile: OpenLinkProfile) =
         broadcast(OpenLink.CAPABILITY_PROFILE) { it.onProfileChanged(profile) }
@@ -271,6 +311,15 @@ class OpenLinkHost(
         // wall clock: look again at least every STOP_CHECK_MILLIS, so an end overdue during sleep
         // comes soon after the phone wakes.
         stopTimer.postDelayed(checkStops, (deadline - System.currentTimeMillis()).coerceIn(0L, STOP_CHECK_MILLIS))
+    }
+
+    private fun tellMarks(packageName: String, sessionId: String) {
+        sessions.marksOf(sessionId, packageName)?.let { tellResults(packageName, it) }
+    }
+
+    private fun tellResults(packageName: String, results: OpenLinkWorkoutResults) {
+        if (core.versionOf(packageName) < OpenLink.WORKOUT_VERSION) return
+        broadcastTo(packageName, OpenLink.CAPABILITY_WORKOUT) { listener, _ -> listener.onWorkoutResults(results) }
     }
 
     private fun tellRecording(packageName: String, state: OpenLinkRecordingState) {

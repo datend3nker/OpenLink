@@ -176,6 +176,8 @@ interface IOpenLinkHost {
     // settings, version 3 (appended last)
     oneway void setSettings(in OpenLinkSettings settings);
     OpenLinkSettings getSettings();
+    // workout, version 4 (appended last)
+    oneway void setWorkoutPlan(in OpenLinkWorkoutPlan plan);
 }
 
 oneway interface IOpenLinkListener {
@@ -188,6 +190,8 @@ oneway interface IOpenLinkListener {
     void onDataWritten(in OpenLinkDataWritten written);                // capability devices
     // version 3 (appended last), sent only to a client that negotiated version 3
     void onSettingsChanged(in OpenLinkSettings settings);              // capability settings
+    // version 4 (appended last), sent only to a client that negotiated version 4
+    void onWorkoutResults(in OpenLinkWorkoutResults results);          // capability workout
 }
 ```
 
@@ -220,7 +224,10 @@ so an old client never crashes against a stricter host.
 
 ### Versioning
 
-`protocolVersion` is an integer, 3 in this version. Version 3 adds the `settings` capability,
+`protocolVersion` is an integer, 4 in this version. Version 4 adds the `workout` capability,
+`setWorkoutPlan`, `onWorkoutResults` and the device features `WORKOUT_PLAN` and `WORKOUT_INPUT`
+(see The workout plan below); a side that negotiated an older version sends and accepts no plan,
+and the workout records as before. Version 3 adds the `settings` capability,
 `setSettings`, `getSettings` and `onSettingsChanged` (see Settings below); a side that
 negotiated an older version sends and accepts no settings. Version 2 adds `RECORD` mode, the `PAUSED`
 phase, `pauseRecording` and `resumeRecording`, the workout summary, `onDataWritten`, and the
@@ -245,8 +252,8 @@ no-op. A new capability is a new name in `requestedCapabilities`, ignored by an 
   `integration` (`GARMIN`, `WEAROS`, `XIAOMI`), `connection` (`CONNECTED`, `DISCONNECTED`,
   `UNKNOWN`), `batteryPercent`, `batteryUpdatedAtMillis`, `lastSyncedAtMillis`, `syncing`,
   `supportsSync`, `supportsRecording`, `liveSampleTypes`, and from version 2 `recordingFeatures`
-  (subset of `GPS`, `HEART_RATE`, `PAUSE`, `AUTO_PAUSE`: what the device does when it records a
-  workout of its own), `exerciseTypes` (the Health Connect exercise types it can record itself),
+  (subset of `GPS`, `HEART_RATE`, `PAUSE`, `AUTO_PAUSE`, and from version 4 `WORKOUT_PLAN` and
+  `WORKOUT_INPUT`: what the device does when it records a workout of its own), `exerciseTypes` (the Health Connect exercise types it can record itself),
   `measurements` (subset of `HEART_RATE`, `HRV`, `SPO2`, `SKIN_TEMPERATURE`: what it measures),
   `lastSyncResult` (`SUCCEEDED`, `INTERRUPTED`, `PERMISSION_MISSING`, `DISCONNECTED`, `FAILED`)
   and `lastSyncAttemptAtMillis`; `lastSyncedAtMillis` stays the last sync that succeeded.
@@ -307,6 +314,64 @@ What keeps the capability from becoming a way to carry anything:
 | `goal.elevation_meters` | 1 | 1 to 5 000 | daily ascent, m |
 | `goal.water_ml` | 1 | 100 to 10 000 | daily water, ml |
 | `zones.lower_bpm` | 5 | 30 to 250, rising | the user's own lowest bpm of zones 1 to 5 |
+
+### The workout plan (version 4)
+
+A client that runs a structured workout (exercises, sets, targets, weights) has the wearable
+that records it show the workout, and takes over the sets the user marks there. The client stays
+the owner: its workout is the truth, the wearable shows a copy and suggests changes. Following a
+workout from another client (a second screen) is proposed in `docs/proposals/workout-plan.md`,
+under a capability of its own, and not part of this version.
+
+- **Its own capability, `workout`,** asked for, shown on the consent screen and revocable like
+  the others. It is the one place OpenLink carries user text (the exercises' names), so it is not
+  part of `recording`. Without it, or below version 4, nothing crosses.
+- **A plan belongs to a `RECORD` session.** The host takes one only from the session's owner,
+  while the workout runs and is not being stopped; any other is dropped. It ends with the
+  session. When the owner loses `workout`, the host app is told the plan is gone
+  (`setWorkoutPlan` with null) and the recording goes on.
+- **Always the whole plan** (`OpenLinkWorkoutPlan`): `sessionId`, `revision`, `currentSetId`
+  (the set the client shows as next; sets may be done out of order) and the exercises in order.
+  An exercise: `exerciseId`, `label`, `kind` (`WEIGHTED`, `CARDIO`), `resistance` (`NONE`,
+  `EXTERNAL`, `BODYWEIGHT`), `supersetWithNext`, `segmentType` (the Health Connect exercise
+  segment type, optional), `restMinSeconds`, `restMaxSeconds`, `restAfterFailureSeconds`, and its
+  sets. A set: `setId`, the target (`repsMin`..`repsMax`, or `targetSeconds`, or `targetMeters`),
+  `weight` and `weightUnit` (`KG`, `LB`), its state as the client holds it (`done`, `repsDone`,
+  `secondsDone`, `metersDone`, `doneAtMillis`) and `updatedAtMillis`, when the client last
+  changed it. The client sends the plan again after every change. The client library stamps
+  `revision` from the clock, so a client that restarted is still newer; the host keeps the
+  newest and drops an older or equal one, so a replay is harmless. The wearable counts the rest
+  itself, from the last `doneAtMillis` and the rest times.
+- **Results are state, not events** (`OpenLinkWorkoutResults`): per `setId` the wearable's
+  latest word: `done` or not done again, `repsDone`, `weight` and `weightUnit` if changed there,
+  `secondsDone`, `metersDone`, and `atMillis` on the phone's clock. The newer word on a set wins.
+  The host app publishes what changed; the library merges it into the session's and sends the
+  owner all of them: on each change, after a start the owner replays (so one that was away
+  catches up), and before the end of a workout that ended while it was away. Getting them twice
+  changes nothing. The client applies a set's result if its `atMillis` is newer than the set's
+  `updatedAtMillis` and sends the plan again, which the wearable takes as the answer; it drops a
+  result for a set its plan no longer has. The library keeps the results in memory, with the
+  last 16 ended workouts too; after a restart of the host the host app publishes them again.
+- **The wearable marks sets, nothing more.** It does not add, remove, skip or reorder: the
+  client alone changes the plan's shape.
+- **One text, bounded.** `label` is at most 48 characters; the library strips control characters
+  and line breaks on both sides. Ids are the client's, opaque, 1 to 32 of `[A-Za-z0-9_-]`,
+  unique in the plan. Everything else is numbers and enums. The label is shown and kept only
+  while the workout runs: never logged (logs count plans), never written to Health Connect,
+  which gets `segmentType` instead.
+- **Limits.** 40 exercises, 30 sets per exercise, 300 sets per plan; reps 0 to 1 000, weight 0 to
+  1 000, seconds 0 to 86 400, meters 0 to 1 000 000. A plan that breaks one is dropped whole, on
+  the side that receives it: half a plan would show a wrong workout. A result that does not fit
+  is dropped alone.
+- **What a device can do** is in its `recordingFeatures`: `WORKOUT_PLAN` (it shows a plan) and
+  `WORKOUT_INPUT` (sets can be marked on it). A client reads them before it promises the user
+  anything; a host app whose device has neither ignores the plan.
+- **Health Connect: whoever records, writes.** The host writes the session, the heart rate, and
+  one exercise segment per done set (its `segmentType`, its repetitions, its time), from the last
+  plan and the results. The client writes no session and no segments for that workout. Weights,
+  targets and labels stay in the client's own data.
+- **Never crosses:** notes, links, a workout's history, anything that names the user or another
+  session, and text other than `label`.
 
 ### Delegated recording (version 2)
 

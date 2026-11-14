@@ -7,6 +7,8 @@ import tech.mmarca.openlink.OpenLinkRecordingMode
 import tech.mmarca.openlink.OpenLinkRecordingPhase
 import tech.mmarca.openlink.OpenLinkRecordingRequest
 import tech.mmarca.openlink.OpenLinkRecordingState
+import tech.mmarca.openlink.OpenLinkSetResult
+import tech.mmarca.openlink.OpenLinkWorkoutResults
 import tech.mmarca.openlink.OpenLinkWorkoutSummary
 
 class OpenLinkSessionsTest {
@@ -531,6 +533,66 @@ class OpenLinkSessionsTest {
         assertThat(sessions.unheldStop("mine", "a")).isNull()
         sessions.reported(stopped("mine", at = 7))
         assertThat(sessions.unheldStop("mine", "a")).isEqualTo(stopped("mine", at = 7))
+    }
+
+    // --- the workout plan
+
+    private fun marks(id: String, vararg sets: Pair<String, Long>) =
+        OpenLinkWorkoutResults(id, sets.associate { (setId, at) -> setId to OpenLinkSetResult(done = true, atMillis = at) })
+
+    @Test
+    fun `a plan is taken from the owner of a running recorded workout, the newest only`() {
+        sessions.startRecording(workout("w"), "a")
+        sessions.startRecording(stream("s"), "a")
+
+        assertThat(sessions.planned("w", "b", revision = 5)).isFalse()
+        assertThat(sessions.planned("s", "a", revision = 5)).isFalse() // a stream session has no plan
+        assertThat(sessions.planned("none", "a", revision = 5)).isFalse()
+        assertThat(sessions.planned("w", "a", revision = 5)).isTrue()
+        assertThat(sessions.planned("w", "a", revision = 5)).isFalse() // a replay
+        assertThat(sessions.planned("w", "a", revision = 4)).isFalse()
+        assertThat(sessions.planned("w", "a", revision = 6)).isTrue()
+
+        sessions.stopRecording("w", "a")
+        assertThat(sessions.planned("w", "a", revision = 7)).isFalse()
+    }
+
+    @Test
+    fun `losing the workout capability forgets the plans, so a later one is taken again`() {
+        sessions.startRecording(workout("w"), "a")
+        sessions.startRecording(workout("other"), "b")
+        sessions.planned("w", "a", revision = 5)
+        sessions.planned("other", "b", revision = 5)
+
+        assertThat(sessions.dropPlans("a")).containsExactly("w")
+        assertThat(sessions.dropPlans("a")).isEmpty()
+        assertThat(sessions.planned("w", "a", revision = 5)).isTrue()
+    }
+
+    @Test
+    fun `sets marked on the wearable reach the owner with all of the session's, once per change`() {
+        sessions.startRecording(workout("w"), "a")
+
+        assertThat(sessions.marked(marks("w", "s1" to 10))).isEqualTo("a" to marks("w", "s1" to 10))
+        assertThat(sessions.marked(marks("w", "s1" to 10))).isNull() // a repeat
+        assertThat(sessions.marked(marks("w", "s1" to 5))).isNull() // older
+        assertThat(sessions.marked(marks("w", "s2" to 20))).isEqualTo("a" to marks("w", "s1" to 10, "s2" to 20))
+        assertThat(sessions.marked(marks("nobody", "s1" to 10))).isNull()
+
+        // For an owner that comes back.
+        assertThat(sessions.marksOf("w", "a")).isEqualTo(marks("w", "s1" to 10, "s2" to 20))
+        assertThat(sessions.marksOf("w", "b")).isNull()
+    }
+
+    @Test
+    fun `the marked sets stay with an ended workout, and a late one still reaches its owner`() {
+        sessions.startRecording(workout("w"), "a")
+        sessions.marked(marks("w", "s1" to 10))
+        sessions.reported(stopped("w", at = 30))
+
+        assertThat(sessions.marksOf("w", "a")).isEqualTo(marks("w", "s1" to 10))
+        assertThat(sessions.marked(marks("w", "s2" to 25))).isEqualTo("a" to marks("w", "s1" to 10, "s2" to 25))
+        assertThat(sessions.marksOf("w", "b")).isNull()
     }
 
     @Test

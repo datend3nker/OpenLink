@@ -7,6 +7,7 @@ import tech.mmarca.openlink.OpenLinkRecordingState;
 import tech.mmarca.openlink.OpenLinkLiveBatch;
 import tech.mmarca.openlink.OpenLinkDataWritten;
 import tech.mmarca.openlink.OpenLinkSettings;
+import tech.mmarca.openlink.OpenLinkWorkoutResults;
 
 /**
  * What a host tells a bound client. Every method is oneway: the host never waits on a
@@ -32,4 +33,8 @@ oneway interface IOpenLinkListener {
     // version 3. Appended last; the host sends it only to a client that negotiated version 3.
     /** The host's settings changed: all of them, each with its time (capability settings). */
     void onSettingsChanged(in OpenLinkSettings settings);
+
+    // version 4. Appended last; the host sends it only to a client that negotiated version 4.
+    /** The sets marked on the wearable, all of the session's, to its owner (capability workout). */
+    void onWorkoutResults(in OpenLinkWorkoutResults results);
 }

@@ -8,6 +8,7 @@ import tech.mmarca.openlink.OpenLinkRecordingMode
 import tech.mmarca.openlink.OpenLinkRecordingPhase
 import tech.mmarca.openlink.OpenLinkRecordingRequest
 import tech.mmarca.openlink.OpenLinkRecordingState
+import tech.mmarca.openlink.OpenLinkWorkoutResults
 import tech.mmarca.openlink.OpenLinkWorkoutSummary
 
 /** A recording session or live subscription a client holds on the host. */
@@ -94,6 +95,16 @@ class OpenLinkSessions(
 
     /** The last recorded workouts the host ended, oldest first, with their final state. */
     private val finished = linkedMapOf<Done, OpenLinkRecordingState>()
+
+    /** The revision of the newest workout plan taken for a recorded workout, by session id. */
+    private val planRevisions = mutableMapOf<String, Long>()
+
+    /**
+     * The sets marked on the wearable, of the workouts held now (by session id) and of the ended
+     * ones remembered. In memory only: after a restart the host app reports them again.
+     */
+    private val marks = mutableMapOf<String, OpenLinkWorkoutResults>()
+    private val finishedMarks = mutableMapOf<Done, OpenLinkWorkoutResults>()
 
     private val _active = MutableStateFlow<List<OpenLinkActiveSession>>(emptyList())
 
@@ -227,9 +238,9 @@ class OpenLinkSessions(
         }
         val workout = workouts[sessionId] ?: return owner
         if (over) {
-            drop(key)
+            val marked = drop(key)
             // A start the host app refused (busy, not connected) ran no workout: nothing to keep.
-            if (workout.ran || state.phase == OpenLinkRecordingPhase.STOPPED) remember(sessionId, owner, state)
+            if (workout.ran || state.phase == OpenLinkRecordingPhase.STOPPED) remember(sessionId, owner, state, marked)
             publish()
             return owner
         }
@@ -258,6 +269,59 @@ class OpenLinkSessions(
     @Synchronized
     fun owner(capability: String, sessionId: String): String? = owners[Key(capability, sessionId)]
 
+    /**
+     * A workout plan with [revision] from [packageName] for [sessionId]. True if the host app is
+     * to take it: the session is the caller's recorded workout, not being stopped, and the plan
+     * is newer than the last one taken.
+     */
+    @Synchronized
+    fun planned(sessionId: String, packageName: String, revision: Long): Boolean {
+        if (owners[Key(OpenLink.CAPABILITY_RECORDING, sessionId)] != packageName) return false
+        if (workouts[sessionId]?.stopping != false) return false
+        if (revision <= (planRevisions[sessionId] ?: Long.MIN_VALUE)) return false
+        planRevisions[sessionId] = revision
+        return true
+    }
+
+    /** Forgets the plans of [packageName]'s workouts (it lost the capability): their session ids. */
+    @Synchronized
+    fun dropPlans(packageName: String): List<String> {
+        val dropped = planRevisions.keys.filter { owners[Key(OpenLink.CAPABILITY_RECORDING, it)] == packageName }
+        dropped.forEach(planRevisions::remove)
+        return dropped
+    }
+
+    /**
+     * The host app reported sets marked on the wearable. They are merged into the session's,
+     * the newer word per set winning; returns the owner to tell with all of the session's, or
+     * null if no one holds it or nothing changed. For an ended workout (a set marked just before
+     * the stop) they go to the latest that ended under the id.
+     */
+    @Synchronized
+    fun marked(results: OpenLinkWorkoutResults): Pair<String, OpenLinkWorkoutResults>? {
+        val sessionId = results.sessionId
+        val owner = owners[Key(OpenLink.CAPABILITY_RECORDING, sessionId)]
+        if (owner != null) {
+            if (sessionId !in workouts) return null
+            val before = marks[sessionId] ?: OpenLinkWorkoutResults(sessionId)
+            val merged = before.merge(results)
+            if (merged == before) return null
+            marks[sessionId] = merged
+            return owner to merged
+        }
+        val done = finished.keys.lastOrNull { it.sessionId == sessionId } ?: return null
+        val before = finishedMarks[done] ?: OpenLinkWorkoutResults(sessionId)
+        val merged = before.merge(results)
+        if (merged == before) return null
+        finishedMarks[done] = merged
+        return done.owner to merged
+    }
+
+    /** The sets marked in [packageName]'s workout [sessionId], held now or ended; null if none. */
+    @Synchronized
+    fun marksOf(sessionId: String, packageName: String): OpenLinkWorkoutResults? =
+        if (owners[Key(OpenLink.CAPABILITY_RECORDING, sessionId)] == packageName) marks[sessionId] else finishedMarks[Done(packageName, sessionId)]
+
     /** A session [releaseAll] ended; [stopOwed] if the host app has not been handed its stop yet. */
     data class Released(val sessionId: String, val stopOwed: Boolean)
 
@@ -276,8 +340,8 @@ class OpenLinkSessions(
         }.keys.toList()
         val released = keys.map { key ->
             val workout = if (key.capability == OpenLink.CAPABILITY_RECORDING) workouts[key.sessionId] else null
-            drop(key)
-            if (workout != null) remember(key.sessionId, packageName, hostStopped(key.sessionId))
+            val marked = drop(key)
+            if (workout != null) remember(key.sessionId, packageName, hostStopped(key.sessionId), marked)
             Released(key.sessionId, stopOwed = workout?.stopping != true)
         }
         if (keys.isNotEmpty()) publish()
@@ -298,9 +362,9 @@ class OpenLinkSessions(
         val ends = expired.mapNotNull { sessionId ->
             val key = Key(OpenLink.CAPABILITY_RECORDING, sessionId)
             val owner = owners[key] ?: return@mapNotNull null
-            drop(key)
+            val marked = drop(key)
             val end = hostStopped(sessionId)
-            remember(sessionId, owner, end)
+            remember(sessionId, owner, end, marked)
             owner to end
         }
         if (expired.isNotEmpty()) publish()
@@ -315,11 +379,14 @@ class OpenLinkSessions(
     private fun hostStopped(sessionId: String) =
         OpenLinkRecordingState(sessionId, "", OpenLinkRecordingPhase.STOPPED, OpenLinkRecordingState.REASON_HOST_STOPPED, clock())
 
-    private fun drop(key: Key) {
+    /** Removes the session; returns the sets marked in it, for [remember] if it is remembered. */
+    private fun drop(key: Key): OpenLinkWorkoutResults? {
         owners.remove(key)
-        if (key.capability != OpenLink.CAPABILITY_RECORDING) return
+        if (key.capability != OpenLink.CAPABILITY_RECORDING) return null
         begunAt.remove(key.sessionId)
+        planRevisions.remove(key.sessionId)
         if (workouts.remove(key.sessionId) != null) storage?.remove(storageKey(key.sessionId))
+        return marks.remove(key.sessionId)
     }
 
     /** Writes the recorded workout [sessionId], if it is one, to the storage. */
@@ -336,10 +403,11 @@ class OpenLinkSessions(
         )
     }
 
-    private fun remember(sessionId: String, owner: String, last: OpenLinkRecordingState) {
+    private fun remember(sessionId: String, owner: String, last: OpenLinkRecordingState, marked: OpenLinkWorkoutResults? = null) {
         val done = Done(owner, sessionId)
         finished.remove(done)
         finished[done] = last
+        if (marked != null) finishedMarks[done] = marked
         storage?.write(endedKey(done), encodeFinished(owner, last))
         trimFinished()
     }
@@ -348,6 +416,7 @@ class OpenLinkSessions(
         while (finished.size > MAX_FINISHED) {
             val eldest = finished.keys.first()
             finished.remove(eldest)
+            finishedMarks.remove(eldest)
             storage?.remove(endedKey(eldest))
         }
     }

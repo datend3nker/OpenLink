@@ -5,6 +5,7 @@ import tech.mmarca.openlink.OpenLinkLiveSubscription
 import tech.mmarca.openlink.OpenLinkProfile
 import tech.mmarca.openlink.OpenLinkRecordingRequest
 import tech.mmarca.openlink.OpenLinkSettings
+import tech.mmarca.openlink.OpenLinkWorkoutPlan
 
 /**
  * What the host app implements. Every method is called on a binder thread, only for a
@@ -58,4 +59,16 @@ interface OpenLinkHostCapabilities {
      * if anything changed, so its other clients hear of it.
      */
     fun setSettings(caller: OpenLinkCaller, settings: OpenLinkSettings) = Unit
+
+    // workout, version 4. A host whose devices show no plan leaves it as it is.
+    /**
+     * The plan of the recorded workout [sessionId], for its device to show: always the whole
+     * plan, already checked ([OpenLinkWorkoutPlan.valid]), from the session's owner, newer than
+     * the last. Null: the owner lost the capability, so the device shows none any more. The host
+     * app keeps the plan while the workout runs (for a device that reconnects) and no longer,
+     * never logs a label and never writes one to Health Connect. Sets marked on the device go
+     * back with `OpenLinkHost.publishWorkoutResults`. The host app writes the done sets to
+     * Health Connect as segments of the session it records.
+     */
+    fun setWorkoutPlan(caller: OpenLinkCaller, sessionId: String, plan: OpenLinkWorkoutPlan?) = Unit
 }

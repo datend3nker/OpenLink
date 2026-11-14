@@ -8,6 +8,7 @@ import tech.mmarca.openlink.OpenLinkDevice;
 import tech.mmarca.openlink.OpenLinkRecordingRequest;
 import tech.mmarca.openlink.OpenLinkLiveSubscription;
 import tech.mmarca.openlink.OpenLinkSettings;
+import tech.mmarca.openlink.OpenLinkWorkoutPlan;
 
 /**
  * The host's side of the channel. The caller's identity comes from the binder, never from
@@ -46,4 +47,8 @@ interface IOpenLinkHost {
     /** The settings the caller changed, each with its time; the host keeps the newer per key. */
     oneway void setSettings(in OpenLinkSettings settings);
     OpenLinkSettings getSettings();
+
+    // workout, version 4. Appended last.
+    /** The whole plan of the caller's RECORD session, after every change; the newest revision counts. */
+    oneway void setWorkoutPlan(in OpenLinkWorkoutPlan plan);
 }

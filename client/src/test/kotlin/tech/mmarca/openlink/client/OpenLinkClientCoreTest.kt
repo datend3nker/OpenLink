@@ -60,6 +60,8 @@ class OpenLinkClientCoreTest {
         var sentSettings: OpenLinkSettings? = null
         override fun setSettings(settings: OpenLinkSettings?) { sentSettings = settings; calls += "setSettings:${settings?.entries?.keys?.sorted()}" }
         override fun getSettings(): OpenLinkSettings = hostSettings
+        var sentPlans = mutableListOf<tech.mmarca.openlink.OpenLinkWorkoutPlan>()
+        override fun setWorkoutPlan(plan: tech.mmarca.openlink.OpenLinkWorkoutPlan?) { sentPlans += plan!!; calls += "plan:${plan.sessionId}" }
         override fun asBinder(): IBinder? = null
     }
 
@@ -71,6 +73,7 @@ class OpenLinkClientCoreTest {
         override fun onLiveSamples(batch: OpenLinkLiveBatch?) = Unit
         override fun onDataWritten(written: tech.mmarca.openlink.OpenLinkDataWritten?) = Unit
         override fun onSettingsChanged(settings: OpenLinkSettings?) = Unit
+        override fun onWorkoutResults(results: tech.mmarca.openlink.OpenLinkWorkoutResults?) = Unit
         override fun asBinder(): IBinder? = null
     }
 
@@ -438,6 +441,83 @@ class OpenLinkClientCoreTest {
             OpenLinkRecordingState("rec", "w1", OpenLinkRecordingPhase.STOPPED, OpenLinkRecordingState.REASON_STOPPED_BY_CLIENT, now),
         )
         assertThat(host.calls.filter { it.endsWith(":rec") }).isEmpty()
+        job.cancel()
+    }
+
+    // --- the workout plan
+
+    private fun plan(label: String = "Bench press") = tech.mmarca.openlink.OpenLinkWorkoutPlan(
+        "rec",
+        listOf(
+            tech.mmarca.openlink.OpenLinkWorkoutExercise(
+                "e1", label, sets = listOf(tech.mmarca.openlink.OpenLinkWorkoutSet("s1", repsMin = 8, repsMax = 12, weight = 60.0)),
+            ),
+        ),
+        currentSetId = "s1",
+    )
+
+    @Test
+    fun `a plan goes to the host that has the workout, each change newer, and again after a reconnect`() {
+        val host = FakeHost(trusted)
+        core.onConnected(host, NoListener)
+        core.setWorkoutPlan(plan()) // no such workout yet
+        core.startRecording(record)
+
+        core.setWorkoutPlan(plan())
+        core.setWorkoutPlan(plan("Squat"))
+
+        assertThat(host.sentPlans.map { it.exercises.single().label }).containsExactly("Bench press", "Squat").inOrder()
+        assertThat(host.sentPlans[1].revision).isGreaterThan(host.sentPlans[0].revision)
+
+        core.onDisconnected()
+        val again = FakeHost(trusted)
+        core.onConnected(again, NoListener)
+        assertThat(again.calls.filter { it.endsWith(":rec") }).containsExactly("start:rec", "plan:rec").inOrder()
+        assertThat(again.sentPlans.single()).isEqualTo(host.sentPlans[1])
+    }
+
+    @Test
+    fun `a plan waits for the workout capability, and none goes to a version 3 host or for a broken plan`() {
+        val noWorkout = trusted.copy(grantedCapabilities = OpenLink.ALL_CAPABILITIES - OpenLink.CAPABILITY_WORKOUT)
+        val host = FakeHost(noWorkout)
+        core.onConnected(host, NoListener)
+        core.startRecording(record)
+        core.setWorkoutPlan(plan())
+        core.setWorkoutPlan(plan("x".repeat(100))) // dropped: the one before stays
+        assertThat(host.sentPlans).isEmpty()
+
+        core.events.onStateChanged(trusted)
+        assertThat(host.sentPlans.single().exercises.single().label).isEqualTo("Bench press")
+
+        core.onDisconnected()
+        val old = FakeHost(trusted.copy(protocolVersion = 3))
+        core.onConnected(old, NoListener)
+        assertThat(old.calls).contains("start:rec")
+        assertThat(old.sentPlans).isEmpty()
+    }
+
+    @Test
+    fun `a stopped workout's plan is not sent again, but its marked sets still reach the app`() = runTest(UnconfinedTestDispatcher()) {
+        val seen = mutableListOf<tech.mmarca.openlink.OpenLinkWorkoutResults>()
+        val job = launch { core.workoutResults.collect { seen += it } }
+        val host = FakeHost(trusted)
+        core.onConnected(host, NoListener)
+        core.startRecording(record)
+        core.setWorkoutPlan(plan())
+        val marked = tech.mmarca.openlink.OpenLinkWorkoutResults(
+            "rec", mapOf("s1" to tech.mmarca.openlink.OpenLinkSetResult(done = true, atMillis = 150, repsDone = 9)),
+        )
+
+        core.events.onWorkoutResults(marked)
+        core.events.onWorkoutResults(marked.copy(sessionId = "someone else's"))
+        core.stopRecording("rec")
+        core.events.onWorkoutResults(marked)
+
+        assertThat(seen).containsExactly(marked, marked)
+        core.onDisconnected()
+        val again = FakeHost(trusted)
+        core.onConnected(again, NoListener)
+        assertThat(again.sentPlans).isEmpty()
         job.cancel()
     }
 

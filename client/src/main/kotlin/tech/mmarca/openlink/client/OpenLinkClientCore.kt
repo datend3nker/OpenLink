@@ -23,6 +23,8 @@ import tech.mmarca.openlink.OpenLinkRecordingState
 import tech.mmarca.openlink.OpenLinkSettings
 import tech.mmarca.openlink.OpenLinkSigners
 import tech.mmarca.openlink.OpenLinkState
+import tech.mmarca.openlink.OpenLinkWorkoutPlan
+import tech.mmarca.openlink.OpenLinkWorkoutResults
 
 /**
  * Whether a client may bind a host signed by [signers]: under one of the keys the app ships
@@ -109,6 +111,15 @@ class OpenLinkClientCore(
     /** The host wrote new data to Health Connect: read it again for these types and times. */
     val dataWritten: SharedFlow<OpenLinkDataWritten> = _dataWritten.asSharedFlow()
 
+    private val _workoutResults = MutableSharedFlow<OpenLinkWorkoutResults>(extraBufferCapacity = 16, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+
+    /**
+     * The sets marked on the wearable (version 4, capability workout): all of a session's, each
+     * time one changes and again after a reconnect. Apply a set's result if it is newer than the
+     * app's own change of that set, then send the plan again. No replay.
+     */
+    val workoutResults: SharedFlow<OpenLinkWorkoutResults> = _workoutResults.asSharedFlow()
+
     private val _profileExchangedAtMillis = MutableStateFlow(0L)
 
     /** When a body profile last went to the host or came from it on this run; 0 if not yet. */
@@ -142,6 +153,10 @@ class OpenLinkClientCore(
     /** Recorded workouts the host ended lately, whose fuller end (a later summary) still counts. */
     private val ended = linkedSetOf<String>()
     private val subscriptions = linkedMapOf<String, OpenLinkLiveSubscription>()
+
+    /** The newest plan of each recorded workout the app holds, sent again after a reconnect. */
+    private val plans = mutableMapOf<String, OpenLinkWorkoutPlan>()
+    private var lastRevision = 0L
 
     /** What [listener] (the binder side's stub) forwards here. */
     val events: Events = Events()
@@ -222,8 +237,24 @@ class OpenLinkClientCore(
         if (host != null && granted(OpenLink.CAPABILITY_RECORDING)) begin(host, request)
     }
 
+    /**
+     * Shows [plan] on the wearable that records its session (version 4, capability workout): a
+     * recorded workout this app started. Always the whole plan, again after every change; it is
+     * sent now if the host has the workout and allows it, else once it does. A plan that breaks
+     * a limit ([OpenLinkWorkoutPlan.valid]) is dropped whole. The library stamps the revision.
+     */
+    fun setWorkoutPlan(plan: OpenLinkWorkoutPlan) {
+        if (recordings[plan.sessionId]?.mode != OpenLinkRecordingMode.RECORD) return
+        val valid = plan.valid() ?: return
+        // The clock, so a plan sent after this app restarted is still newer to the host.
+        lastRevision = maxOf(clock(), lastRevision + 1)
+        plans[plan.sessionId] = valid.copy(revision = lastRevision)
+        flushPlan(plan.sessionId)
+    }
+
     fun stopRecording(sessionId: String) {
         controls.remove(sessionId)
+        plans.remove(sessionId)
         val request = recordings.remove(sessionId) ?: return
         if (request.mode == OpenLinkRecordingMode.RECORD && sessionId !in begun) {
             // No host has it (the capability is still pending): no workout ran, and no end would
@@ -279,6 +310,15 @@ class OpenLinkClientCore(
 
     private fun granted(capability: String): Boolean = state()?.has(capability) == true
 
+    private fun workoutAllowed(state: OpenLinkState? = state()): Boolean =
+        state != null && state.protocolVersion >= OpenLink.WORKOUT_VERSION && state.has(OpenLink.CAPABILITY_WORKOUT)
+
+    /** Sends the plan of [sessionId] if the host has been sent the workout and takes plans. */
+    private fun flushPlan(sessionId: String) {
+        val plan = plans[sessionId] ?: return
+        if (sessionId in begun && workoutAllowed()) host?.setWorkoutPlan(plan)
+    }
+
     private fun settingsAllowed(state: OpenLinkState? = state()): Boolean =
         state != null && state.protocolVersion >= OpenLink.SETTINGS_VERSION && state.has(OpenLink.CAPABILITY_SETTINGS)
 
@@ -313,6 +353,7 @@ class OpenLinkClientCore(
                 // One the app stopped already, whose end it missed, ends here too.
                 val request = recordings.remove(sessionId)
                 controls.remove(sessionId)
+                plans.remove(sessionId)
                 remember(sessionId)
                 _recordingStates.tryEmit(
                     OpenLinkRecordingState(sessionId, request?.deviceId.orEmpty(), OpenLinkRecordingPhase.STOPPED, OpenLinkRecordingState.REASON_HOST_STOPPED, clock()),
@@ -324,6 +365,9 @@ class OpenLinkClientCore(
             flushStops()
             // A copy: a request this host cannot take is dropped from the map as it is replayed.
             recordings.values.toList().forEach { begin(host, it) }
+        } else if (workoutAllowed(state) && !workoutAllowed(before)) {
+            // The workouts are there already; their plans waited for the grant.
+            plans.keys.toList().forEach(::flushPlan)
         }
         if (state.has(OpenLink.CAPABILITY_LIVE) && before?.has(OpenLink.CAPABILITY_LIVE) != true) {
             subscriptions.values.forEach(host::subscribeLive)
@@ -341,6 +385,7 @@ class OpenLinkClientCore(
         if (request.mode == OpenLinkRecordingMode.RECORD && version < 2) {
             recordings.remove(request.sessionId)
             controls.remove(request.sessionId)
+            plans.remove(request.sessionId)
             _recordingStates.tryEmit(
                 OpenLinkRecordingState(
                     request.sessionId,
@@ -357,6 +402,7 @@ class OpenLinkClientCore(
         controls[request.sessionId]?.let { (paused, at) ->
             if (paused) host.pauseRecording(request.sessionId, at) else host.resumeRecording(request.sessionId, at)
         }
+        flushPlan(request.sessionId)
     }
 
     private fun remember(sessionId: String) {
@@ -402,6 +448,13 @@ class OpenLinkClientCore(
             if (!profile.isEmpty) _profileExchangedAtMillis.value = clock()
         }
 
+        fun onWorkoutResults(results: OpenLinkWorkoutResults) {
+            // Of a workout the app holds, or one that ended lately (a set marked just before).
+            if (workoutAllowed() && (results.sessionId in recordings || results.sessionId in ended)) {
+                _workoutResults.tryEmit(results.valid())
+            }
+        }
+
         fun onSettingsChanged(settings: OpenLinkSettings) {
             if (settingsAllowed()) _hostSettings.value = settings.valid(clock())
         }
@@ -430,6 +483,7 @@ class OpenLinkClientCore(
                 if (over) {
                     recordings.remove(state.sessionId)
                     controls.remove(state.sessionId)
+                    plans.remove(state.sessionId)
                     begun.remove(state.sessionId)
                     remember(state.sessionId)
                 } else if (state.phase == OpenLinkRecordingPhase.PAUSED || state.phase == OpenLinkRecordingPhase.RECORDING) {
