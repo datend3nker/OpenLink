@@ -181,7 +181,38 @@ user's account or any id outside this session, and free text other than `label`.
 - **Watch reconnects:** the host app sends it the newest plan, and the watch sends the changes
   it still holds as pending.
 
+## A second screen: other clients follow the same workout
+
+Wanted: the user picks the UI. A workout started in LiftLog can also be followed, and sets
+ticked, in OpenVitals, or the other way round. The host already holds the plan and the results,
+so it can serve them to more than the owner. This is a step after the watch works; nothing above
+changes for the owner.
+
+- **One owner, as now.** The client that started the `RECORD` session owns the plan. Only it
+  sends `setWorkoutPlan`, and only it can pause, resume or stop.
+- **Followers.** Another client trusted with `workout` may follow a running workout: it calls
+  `followWorkout(sessionId)` and from then on gets the plan with `onWorkoutPlan` (the newest
+  snapshot at once, then each change) and the results the owner gets. It finds running workouts
+  with `getWorkouts()`, which lists the session id, the device and the exercise type, no labels.
+- **A follower marks sets like the watch does.** `setWorkoutResults(results)` from a follower
+  goes into the same per-set results, newer wins. The owner applies it and echoes it in the next
+  snapshot, so the watch and every follower show the same state. A follower cannot change the
+  plan's shape.
+- **Consent covers it.** The labels reach another app only if the user granted that app
+  `workout`; the consent screen says that it may see and mark workouts started by other apps.
+  Should that be a separate capability (`workout.follow`)? See the open questions.
+- **Afterwards** every app sees the finished workout in Health Connect (the session, heart rate,
+  a segment per set), with no OpenLink at all. Weights and labels are in the owner's database
+  only: an app that wants them after the end must have followed the workout.
+
+This breaks one rule on purpose: until now a session's events go to its owner alone. It is
+limited to `workout`, to clients the user trusted with it, and to reading the plan and marking
+sets.
+
 ## Open questions
+
+- Is following a workout part of `workout`, or its own capability, so that an app may send its
+  own plan without seeing other apps' workouts? Proposal: its own, `workout.follow`.
 
 - Does `WORKOUT_INPUT` need its own consent toggle, or is `workout` enough? Proposal: one
   capability, with the device flag deciding what is possible.
