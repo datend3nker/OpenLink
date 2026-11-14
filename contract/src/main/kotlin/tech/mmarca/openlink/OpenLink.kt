@@ -30,11 +30,20 @@ object OpenLink {
      */
     const val CAPABILITY_WORKOUT: String = "workout"
 
-    /** The first protocol version that carries [CAPABILITY_WORKOUT]. */
+    /**
+     * Version 4: following the workouts other apps started ([OpenLinkRunningWorkout]): their
+     * plans with the exercises' names, and the sets marked. Asked for apart from
+     * [CAPABILITY_WORKOUT], so an app may send its own plan without seeing other apps' workouts.
+     */
+    const val CAPABILITY_WORKOUT_FOLLOW: String = "workout.follow"
+
+    /** The first protocol version that carries [CAPABILITY_WORKOUT] and [CAPABILITY_WORKOUT_FOLLOW]. */
     const val WORKOUT_VERSION: Int = 4
 
-    val ALL_CAPABILITIES: Set<String> =
-        setOf(CAPABILITY_PROFILE, CAPABILITY_DEVICES, CAPABILITY_RECORDING, CAPABILITY_LIVE, CAPABILITY_SETTINGS, CAPABILITY_WORKOUT)
+    val ALL_CAPABILITIES: Set<String> = setOf(
+        CAPABILITY_PROFILE, CAPABILITY_DEVICES, CAPABILITY_RECORDING, CAPABILITY_LIVE, CAPABILITY_SETTINGS,
+        CAPABILITY_WORKOUT, CAPABILITY_WORKOUT_FOLLOW,
+    )
 
     fun permissionFor(hostPackage: String): String = hostPackage + PERMISSION_SUFFIX
 }

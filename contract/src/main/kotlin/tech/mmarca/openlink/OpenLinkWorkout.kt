@@ -336,6 +336,43 @@ data class OpenLinkWorkoutResults(
     }
 }
 
+/**
+ * A recorded workout running on the host, as a follower sees it (version 4, capability
+ * `workout.follow`): no label, no owner, nothing from the plan. Follow it to get its plan.
+ */
+data class OpenLinkRunningWorkout(
+    val sessionId: String,
+    /** The device that records it. */
+    val deviceId: String = "",
+    /** The Health Connect exercise type it records. */
+    val exerciseType: Int = 0,
+) : Parcelable {
+    fun toBundle(): Bundle = Bundle().apply {
+        putString(KEY_SESSION, sessionId)
+        putString(KEY_DEVICE, deviceId)
+        putInt(KEY_EXERCISE_TYPE, exerciseType)
+    }
+
+    override fun describeContents(): Int = 0
+
+    override fun writeToParcel(dest: Parcel, flags: Int) = dest.writeFields(toBundle())
+
+    companion object {
+        private const val KEY_SESSION = "sessionId"
+        private const val KEY_DEVICE = "deviceId"
+        private const val KEY_EXERCISE_TYPE = "exerciseType"
+
+        fun fromBundle(bundle: Bundle) = OpenLinkRunningWorkout(
+            sessionId = bundle.getString(KEY_SESSION) ?: "",
+            deviceId = bundle.getString(KEY_DEVICE) ?: "",
+            exerciseType = bundle.getInt(KEY_EXERCISE_TYPE, 0),
+        )
+
+        @JvmField
+        val CREATOR: Parcelable.Creator<OpenLinkRunningWorkout> = parcelableCreator(::fromBundle) { arrayOfNulls(it) }
+    }
+}
+
 /** The bundles under [key]; none if absent. Bundle is itself a Parcelable. */
 @Suppress("DEPRECATION")
 private fun Bundle.bundles(key: String): List<Bundle> = getParcelableArrayList<Bundle>(key).orEmpty()

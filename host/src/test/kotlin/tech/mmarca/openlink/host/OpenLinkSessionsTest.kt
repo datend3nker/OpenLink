@@ -8,7 +8,9 @@ import tech.mmarca.openlink.OpenLinkRecordingPhase
 import tech.mmarca.openlink.OpenLinkRecordingRequest
 import tech.mmarca.openlink.OpenLinkRecordingState
 import tech.mmarca.openlink.OpenLinkSetResult
+import tech.mmarca.openlink.OpenLinkWorkoutPlan
 import tech.mmarca.openlink.OpenLinkWorkoutResults
+import tech.mmarca.openlink.OpenLinkRunningWorkout
 import tech.mmarca.openlink.OpenLinkWorkoutSummary
 
 class OpenLinkSessionsTest {
@@ -545,28 +547,28 @@ class OpenLinkSessionsTest {
         sessions.startRecording(workout("w"), "a")
         sessions.startRecording(stream("s"), "a")
 
-        assertThat(sessions.planned("w", "b", revision = 5)).isFalse()
-        assertThat(sessions.planned("s", "a", revision = 5)).isFalse() // a stream session has no plan
-        assertThat(sessions.planned("none", "a", revision = 5)).isFalse()
-        assertThat(sessions.planned("w", "a", revision = 5)).isTrue()
-        assertThat(sessions.planned("w", "a", revision = 5)).isFalse() // a replay
-        assertThat(sessions.planned("w", "a", revision = 4)).isFalse()
-        assertThat(sessions.planned("w", "a", revision = 6)).isTrue()
+        assertThat(sessions.planned(OpenLinkWorkoutPlan("w", revision = 5), "b")).isFalse()
+        assertThat(sessions.planned(OpenLinkWorkoutPlan("s", revision = 5), "a")).isFalse() // a stream session has no plan
+        assertThat(sessions.planned(OpenLinkWorkoutPlan("none", revision = 5), "a")).isFalse()
+        assertThat(sessions.planned(OpenLinkWorkoutPlan("w", revision = 5), "a")).isTrue()
+        assertThat(sessions.planned(OpenLinkWorkoutPlan("w", revision = 5), "a")).isFalse() // a replay
+        assertThat(sessions.planned(OpenLinkWorkoutPlan("w", revision = 4), "a")).isFalse()
+        assertThat(sessions.planned(OpenLinkWorkoutPlan("w", revision = 6), "a")).isTrue()
 
         sessions.stopRecording("w", "a")
-        assertThat(sessions.planned("w", "a", revision = 7)).isFalse()
+        assertThat(sessions.planned(OpenLinkWorkoutPlan("w", revision = 7), "a")).isFalse()
     }
 
     @Test
     fun `losing the workout capability forgets the plans, so a later one is taken again`() {
         sessions.startRecording(workout("w"), "a")
         sessions.startRecording(workout("other"), "b")
-        sessions.planned("w", "a", revision = 5)
-        sessions.planned("other", "b", revision = 5)
+        sessions.planned(OpenLinkWorkoutPlan("w", revision = 5), "a")
+        sessions.planned(OpenLinkWorkoutPlan("other", revision = 5), "b")
 
-        assertThat(sessions.dropPlans("a")).containsExactly("w")
+        assertThat(sessions.dropPlans("a").map { it.sessionId }).containsExactly("w")
         assertThat(sessions.dropPlans("a")).isEmpty()
-        assertThat(sessions.planned("w", "a", revision = 5)).isTrue()
+        assertThat(sessions.planned(OpenLinkWorkoutPlan("w", revision = 5), "a")).isTrue()
     }
 
     @Test
@@ -593,6 +595,60 @@ class OpenLinkSessionsTest {
         assertThat(sessions.marksOf("w", "a")).isEqualTo(marks("w", "s1" to 10))
         assertThat(sessions.marked(marks("w", "s2" to 25))).isEqualTo("a" to marks("w", "s1" to 10, "s2" to 25))
         assertThat(sessions.marksOf("w", "b")).isNull()
+    }
+
+    // --- following a workout
+
+    @Test
+    fun `followers see the running workouts, and a stopped or ended one leaves them`() {
+        val told = mutableListOf<List<OpenLinkRunningWorkout>>()
+        sessions.onWorkoutsChanged = { told += it }
+        sessions.startRecording(workout("w"), "a")
+        sessions.startRecording(stream("s"), "a")
+        sessions.startRecording(workout("v").copy(deviceId = "d2", exerciseType = 70), "b")
+
+        val running = listOf(OpenLinkRunningWorkout("w", "w1", 0), OpenLinkRunningWorkout("v", "d2", 70))
+        assertThat(sessions.running()).isEqualTo(running)
+        sessions.stopRecording("w", "a")
+        assertThat(sessions.running()).isEqualTo(running.drop(1))
+        sessions.reported(stopped("v", at = 9))
+        assertThat(sessions.running()).isEmpty()
+        // Once per change: the stream session changed nothing.
+        assertThat(told).isEqualTo(listOf(running.take(1), running, running.drop(1), emptyList()))
+    }
+
+    @Test
+    fun `a follower gets the plan and the marked sets at once, until the workout stops`() {
+        sessions.startRecording(workout("w"), "a")
+        assertThat(sessions.follow("none", "f")).isNull()
+        assertThat(sessions.follow("w", "f")).isEqualTo(OpenLinkSessions.Following(null, null))
+
+        val plan = OpenLinkWorkoutPlan("w", revision = 5)
+        sessions.planned(plan, "a")
+        sessions.marked(marks("w", "s1" to 10))
+        assertThat(sessions.follow("w", "g")).isEqualTo(OpenLinkSessions.Following(plan, marks("w", "s1" to 10)))
+        assertThat(sessions.followersOf("w")).containsExactly("f", "g")
+
+        sessions.unfollow("w", "g")
+        assertThat(sessions.followersOf("w")).containsExactly("f")
+        sessions.stopRecording("w", "a")
+        assertThat(sessions.followersOf("w")).isEmpty()
+        assertThat(sessions.follow("w", "f")).isNull()
+    }
+
+    @Test
+    fun `a follower that leaves follows nothing, and the device survives a restart`() {
+        val storage = MapStorage()
+        val first = OpenLinkSessions(storage)
+        first.startRecording(workout("w"), "a")
+        first.startRecording(workout("v"), "a")
+        first.follow("w", "f")
+        first.follow("v", "f")
+        first.unfollowAll("f")
+        assertThat(first.followersOf("w")).isEmpty()
+        assertThat(first.followersOf("v")).isEmpty()
+
+        assertThat(OpenLinkSessions(storage).running()).isEqualTo(first.running())
     }
 
     @Test

@@ -27,6 +27,7 @@ import tech.mmarca.openlink.OpenLinkLiveSubscription
 import tech.mmarca.openlink.OpenLinkProfile
 import tech.mmarca.openlink.OpenLinkRecordingRequest
 import tech.mmarca.openlink.OpenLinkRecordingState
+import tech.mmarca.openlink.OpenLinkRunningWorkout
 import tech.mmarca.openlink.OpenLinkSettings
 import tech.mmarca.openlink.OpenLinkSigners
 import tech.mmarca.openlink.OpenLinkState
@@ -78,6 +79,8 @@ class OpenLinkClient(
     val profileExchangedAtMillis: StateFlow<Long> = core.profileExchangedAtMillis
     val hostSettings: StateFlow<OpenLinkSettings> = core.hostSettings
     val workoutResults: SharedFlow<OpenLinkWorkoutResults> = core.workoutResults
+    val workouts: StateFlow<List<OpenLinkRunningWorkout>> = core.workouts
+    val followedPlans: StateFlow<Map<String, OpenLinkWorkoutPlan>> = core.followedPlans
 
     private val listener = object : IOpenLinkListener.Stub() {
         override fun onStateChanged(state: OpenLinkState?) = post { core.events.onStateChanged(state ?: return@post) }
@@ -88,6 +91,8 @@ class OpenLinkClient(
         override fun onDataWritten(written: OpenLinkDataWritten?) = post { core.events.onDataWritten(written ?: return@post) }
         override fun onSettingsChanged(settings: OpenLinkSettings?) = post { core.events.onSettingsChanged(settings ?: return@post) }
         override fun onWorkoutResults(results: OpenLinkWorkoutResults?) = post { core.events.onWorkoutResults(results ?: return@post) }
+        override fun onWorkoutsChanged(workouts: MutableList<OpenLinkRunningWorkout>?) = post { core.events.onWorkoutsChanged(workouts.orEmpty()) }
+        override fun onWorkoutPlan(plan: OpenLinkWorkoutPlan?) = post { core.events.onWorkoutPlan(plan ?: return@post) }
     }
 
     /** Whether the host app is installed and exports a service this client may bind. */
@@ -182,6 +187,8 @@ class OpenLinkClient(
     fun startRecording(request: OpenLinkRecordingRequest) = call { core.startRecording(request) }
     fun stopRecording(sessionId: String) = call { core.stopRecording(sessionId) }
     fun setWorkoutPlan(plan: OpenLinkWorkoutPlan) = call { core.setWorkoutPlan(plan) }
+    fun followWorkout(sessionId: String) = call { core.followWorkout(sessionId) }
+    fun unfollowWorkout(sessionId: String) = call { core.unfollowWorkout(sessionId) }
     fun pauseRecording(sessionId: String) = call { core.pauseRecording(sessionId) }
     fun resumeRecording(sessionId: String) = call { core.resumeRecording(sessionId) }
     fun subscribeLive(subscription: OpenLinkLiveSubscription) = call { core.subscribeLive(subscription) }

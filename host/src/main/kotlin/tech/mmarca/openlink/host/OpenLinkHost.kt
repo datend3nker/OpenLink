@@ -24,6 +24,7 @@ import tech.mmarca.openlink.OpenLinkRecordingMode
 import tech.mmarca.openlink.OpenLinkRecordingPhase
 import tech.mmarca.openlink.OpenLinkRecordingRequest
 import tech.mmarca.openlink.OpenLinkRecordingState
+import tech.mmarca.openlink.OpenLinkRunningWorkout
 import tech.mmarca.openlink.OpenLinkSettings
 import tech.mmarca.openlink.OpenLinkState
 import tech.mmarca.openlink.OpenLinkTrust
@@ -85,11 +86,18 @@ class OpenLinkHost(
             // Without the workout capability the device shows the plan no longer; the workout goes on.
             if (OpenLink.CAPABILITY_WORKOUT !in kept) {
                 val caller = OpenLinkCaller(uid = -1, packageName = packageName, signerSha256 = "")
-                sessions.dropPlans(packageName).forEach { sessionId ->
-                    runCatching { capabilities.setWorkoutPlan(caller, sessionId, null) }.onFailure { Log.w(TAG, "dropping a plan failed", it) }
+                sessions.dropPlans(packageName).forEach { plan ->
+                    runCatching { capabilities.setWorkoutPlan(caller, plan.sessionId, null) }.onFailure { Log.w(TAG, "dropping a plan failed", it) }
+                    // Its followers too: a plan with no exercises is no plan.
+                    tellFollowers(plan.sessionId) { it.onWorkoutPlan(OpenLinkWorkoutPlan(plan.sessionId, revision = plan.revision + 1)) }
                 }
             }
+            if (OpenLink.CAPABILITY_WORKOUT_FOLLOW !in kept) sessions.unfollowAll(packageName)
             broadcastTo(packageName) { listener, caller -> listener.onStateChanged(stateFor(caller)) }
+        }
+        // To the followers' listeners, which exist from here on.
+        sessions.onWorkoutsChanged = { running ->
+            broadcast(OpenLink.CAPABILITY_WORKOUT_FOLLOW, minVersion = OpenLink.WORKOUT_VERSION) { it.onWorkoutsChanged(running) }
         }
         // Stopped workouts kept through a restart wait for their end from here.
         scheduleStopCheck()
@@ -227,9 +235,28 @@ class OpenLinkHost(
                 Log.i(TAG, "dropped a workout plan")
                 return@gated
             }
-            if (sessions.planned(valid.sessionId, caller.packageName, valid.revision)) {
+            if (sessions.planned(valid, caller.packageName)) {
                 capabilities.setWorkoutPlan(caller, valid.sessionId, valid)
+                tellFollowers(valid.sessionId) { it.onWorkoutPlan(valid) }
             }
+        }
+
+        override fun getWorkouts(): List<OpenLinkRunningWorkout> =
+            gatedValue(OpenLink.CAPABILITY_WORKOUT_FOLLOW, emptyList()) { caller ->
+                if (core.versionOf(caller.packageName) < OpenLink.WORKOUT_VERSION) emptyList() else sessions.running()
+            }
+
+        override fun followWorkout(sessionId: String?) = gated(OpenLink.CAPABILITY_WORKOUT_FOLLOW) { caller ->
+            if (core.versionOf(caller.packageName) < OpenLink.WORKOUT_VERSION) return@gated
+            val following = sessions.follow(sessionId ?: return@gated, caller.packageName) ?: return@gated
+            broadcastTo(caller.packageName, OpenLink.CAPABILITY_WORKOUT_FOLLOW) { listener, _ ->
+                following.plan?.let(listener::onWorkoutPlan)
+                following.results?.let(listener::onWorkoutResults)
+            }
+        }
+
+        override fun unfollowWorkout(sessionId: String?) = gated(OpenLink.CAPABILITY_WORKOUT_FOLLOW) { caller ->
+            sessions.unfollow(sessionId ?: return@gated, caller.packageName)
         }
 
         override fun getSettings(): OpenLinkSettings =
@@ -247,12 +274,14 @@ class OpenLinkHost(
     /**
      * Sets were marked on the wearable (version 4): the ones that changed, or all of the
      * session's. To the session's owner, with all of the session's, if it is trusted with
-     * workout. Kept for an owner that is away, and with the workout once it ended.
+     * workout, and to its followers. Kept for an owner that is away, and with the workout once
+     * it ended.
      */
     fun publishWorkoutResults(results: OpenLinkWorkoutResults) {
         synchronized(recordingLock) {
             val (owner, all) = sessions.marked(results.valid()) ?: return
             tellResults(owner, all)
+            tellFollowers(all.sessionId) { it.onWorkoutResults(all) }
         }
     }
 
@@ -322,6 +351,15 @@ class OpenLinkHost(
         broadcastTo(packageName, OpenLink.CAPABILITY_WORKOUT) { listener, _ -> listener.onWorkoutResults(results) }
     }
 
+    /** To the clients following [sessionId] that are still trusted with following. */
+    private fun tellFollowers(sessionId: String, send: (IOpenLinkListener) -> Unit) {
+        val followers = sessions.followersOf(sessionId)
+        if (followers.isEmpty()) return
+        forEachListener { listener, caller ->
+            if (caller.packageName in followers && core.allows(caller, OpenLink.CAPABILITY_WORKOUT_FOLLOW)) send(listener)
+        }
+    }
+
     private fun tellRecording(packageName: String, state: OpenLinkRecordingState) {
         val sent = state.forVersion(core.versionOf(packageName))
         broadcastTo(packageName, OpenLink.CAPABILITY_RECORDING) { listener, _ -> listener.onRecordingStateChanged(sent) }
@@ -350,6 +388,8 @@ class OpenLinkHost(
     /** [packageName] went away: nothing keeps running for it, and its "last connected" moves. */
     private fun left(packageName: String) {
         endSessions(packageName, OpenLinkSessions.SESSION_CAPABILITIES, OpenLinkRecordingState.REASON_HOST_STOPPED, keepDetached = true)
+        // A client that comes back follows again.
+        sessions.unfollowAll(packageName)
         if (packageName in _connected.getAndUpdate { it - packageName }) core.onDisconnected(packageName)
     }
 

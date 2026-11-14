@@ -62,6 +62,10 @@ class OpenLinkClientCoreTest {
         override fun getSettings(): OpenLinkSettings = hostSettings
         var sentPlans = mutableListOf<tech.mmarca.openlink.OpenLinkWorkoutPlan>()
         override fun setWorkoutPlan(plan: tech.mmarca.openlink.OpenLinkWorkoutPlan?) { sentPlans += plan!!; calls += "plan:${plan.sessionId}" }
+        var running = mutableListOf<tech.mmarca.openlink.OpenLinkRunningWorkout>()
+        override fun getWorkouts(): MutableList<tech.mmarca.openlink.OpenLinkRunningWorkout> { calls += "workouts"; return running }
+        override fun followWorkout(sessionId: String?) { calls += "follow:$sessionId" }
+        override fun unfollowWorkout(sessionId: String?) { calls += "unfollow:$sessionId" }
         override fun asBinder(): IBinder? = null
     }
 
@@ -74,6 +78,8 @@ class OpenLinkClientCoreTest {
         override fun onDataWritten(written: tech.mmarca.openlink.OpenLinkDataWritten?) = Unit
         override fun onSettingsChanged(settings: OpenLinkSettings?) = Unit
         override fun onWorkoutResults(results: tech.mmarca.openlink.OpenLinkWorkoutResults?) = Unit
+        override fun onWorkoutsChanged(workouts: MutableList<tech.mmarca.openlink.OpenLinkRunningWorkout>?) = Unit
+        override fun onWorkoutPlan(plan: tech.mmarca.openlink.OpenLinkWorkoutPlan?) = Unit
         override fun asBinder(): IBinder? = null
     }
 
@@ -518,6 +524,70 @@ class OpenLinkClientCoreTest {
         val again = FakeHost(trusted)
         core.onConnected(again, NoListener)
         assertThat(again.sentPlans).isEmpty()
+        job.cancel()
+    }
+
+    // --- following a workout
+
+    private val theirs = tech.mmarca.openlink.OpenLinkRunningWorkout("theirs", "w1", 13)
+
+    @Test
+    fun `a follower sees the running workouts and the newest plan of the one it follows`() {
+        val host = FakeHost(trusted).apply { this.running += theirs }
+        core.onConnected(host, NoListener)
+        assertThat(core.workouts.value).containsExactly(theirs)
+
+        core.followWorkout("theirs")
+        core.followWorkout("theirs") // a repeat
+        assertThat(host.calls.filter { it.startsWith("follow") }).containsExactly("follow:theirs")
+
+        val first = plan().copy(sessionId = "theirs", revision = 5)
+        core.events.onWorkoutPlan(first)
+        core.events.onWorkoutPlan(first.copy(revision = 4, currentSetId = null)) // older: passed on the way
+        core.events.onWorkoutPlan(plan().copy(sessionId = "unfollowed", revision = 9))
+        assertThat(core.followedPlans.value).containsExactly("theirs", first)
+
+        // The workout ended: it leaves the list, and the follow with it.
+        core.events.onWorkoutsChanged(emptyList())
+        assertThat(core.followedPlans.value).isEmpty()
+        core.events.onWorkoutPlan(first.copy(revision = 6))
+        assertThat(core.followedPlans.value).isEmpty()
+    }
+
+    @Test
+    fun `a follow waits for the capability, is made again after a reconnect, and its marked sets reach the app`() = runTest(UnconfinedTestDispatcher()) {
+        val seen = mutableListOf<tech.mmarca.openlink.OpenLinkWorkoutResults>()
+        val job = launch { core.workoutResults.collect { seen += it } }
+        val noFollow = trusted.copy(grantedCapabilities = OpenLink.ALL_CAPABILITIES - OpenLink.CAPABILITY_WORKOUT_FOLLOW)
+        val host = FakeHost(noFollow).apply { this.running += theirs }
+        core.onConnected(host, NoListener)
+        core.followWorkout("theirs")
+        assertThat(core.workouts.value).isEmpty()
+        assertThat(host.calls).containsNoneOf("workouts", "follow:theirs")
+
+        core.events.onStateChanged(trusted)
+        assertThat(core.workouts.value).containsExactly(theirs)
+        assertThat(host.calls.takeLast(2)).containsExactly("workouts", "follow:theirs").inOrder()
+
+        val marked = tech.mmarca.openlink.OpenLinkWorkoutResults(
+            "theirs", mapOf("s1" to tech.mmarca.openlink.OpenLinkSetResult(done = true, atMillis = 150)),
+        )
+        core.events.onWorkoutResults(marked)
+        assertThat(seen).containsExactly(marked)
+
+        core.onDisconnected()
+        val again = FakeHost(trusted.copy(protocolVersion = 3)).apply { this.running += theirs }
+        core.onConnected(again, NoListener)
+        assertThat(again.calls).containsNoneOf("workouts", "follow:theirs") // a version 3 host has no following
+        core.onDisconnected()
+        val third = FakeHost(trusted).apply { this.running += theirs }
+        core.onConnected(third, NoListener)
+        assertThat(third.calls).contains("follow:theirs")
+
+        core.unfollowWorkout("theirs")
+        assertThat(third.calls.last()).isEqualTo("unfollow:theirs")
+        core.events.onWorkoutResults(marked)
+        assertThat(seen).hasSize(1)
         job.cancel()
     }
 

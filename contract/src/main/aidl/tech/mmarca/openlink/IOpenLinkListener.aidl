@@ -8,6 +8,8 @@ import tech.mmarca.openlink.OpenLinkLiveBatch;
 import tech.mmarca.openlink.OpenLinkDataWritten;
 import tech.mmarca.openlink.OpenLinkSettings;
 import tech.mmarca.openlink.OpenLinkWorkoutResults;
+import tech.mmarca.openlink.OpenLinkWorkoutPlan;
+import tech.mmarca.openlink.OpenLinkRunningWorkout;
 
 /**
  * What a host tells a bound client. Every method is oneway: the host never waits on a
@@ -37,4 +39,10 @@ oneway interface IOpenLinkListener {
     // version 4. Appended last; the host sends it only to a client that negotiated version 4.
     /** The sets marked on the wearable, all of the session's, to its owner (capability workout). */
     void onWorkoutResults(in OpenLinkWorkoutResults results);
+
+    // workout.follow, version 4. Appended last.
+    /** The recorded workouts running now changed: all of them (capability workout.follow). */
+    void onWorkoutsChanged(in List<OpenLinkRunningWorkout> workouts);
+    /** A followed workout's plan: the newest at once, then each change; no exercises: no plan. */
+    void onWorkoutPlan(in OpenLinkWorkoutPlan plan);
 }

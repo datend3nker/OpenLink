@@ -8,6 +8,8 @@ import tech.mmarca.openlink.OpenLinkRecordingMode
 import tech.mmarca.openlink.OpenLinkRecordingPhase
 import tech.mmarca.openlink.OpenLinkRecordingRequest
 import tech.mmarca.openlink.OpenLinkRecordingState
+import tech.mmarca.openlink.OpenLinkRunningWorkout
+import tech.mmarca.openlink.OpenLinkWorkoutPlan
 import tech.mmarca.openlink.OpenLinkWorkoutResults
 import tech.mmarca.openlink.OpenLinkWorkoutSummary
 
@@ -79,7 +81,13 @@ class OpenLinkSessions(
          * restart of the host it is unknown until the host app reports again.
          */
         val last: OpenLinkRecordingState? = null,
+        /** The device that records it, and the Health Connect exercise type, for followers. */
+        val deviceId: String = "",
+        val exerciseType: Int = 0,
     )
+
+    /** What a new follower of a workout is told at once. */
+    data class Following(val plan: OpenLinkWorkoutPlan?, val results: OpenLinkWorkoutResults?)
 
     private val owners = linkedMapOf<Key, String>()
 
@@ -96,8 +104,20 @@ class OpenLinkSessions(
     /** The last recorded workouts the host ended, oldest first, with their final state. */
     private val finished = linkedMapOf<Done, OpenLinkRecordingState>()
 
-    /** The revision of the newest workout plan taken for a recorded workout, by session id. */
-    private val planRevisions = mutableMapOf<String, Long>()
+    /** The newest workout plan taken for a recorded workout, by session id. In memory only. */
+    private val plans = mutableMapOf<String, OpenLinkWorkoutPlan>()
+
+    /** The apps following a running workout, by session id. In memory only: a client follows again. */
+    private val followers = mutableMapOf<String, MutableSet<String>>()
+
+    /** The running workouts last told to [onWorkoutsChanged]. */
+    private var running: List<OpenLinkRunningWorkout> = emptyList()
+
+    /**
+     * Called with all running workouts whenever one begins, is stopped or ends; under this
+     * object's lock. The host tells the followers.
+     */
+    var onWorkoutsChanged: ((List<OpenLinkRunningWorkout>) -> Unit)? = null
 
     /**
      * The sets marked on the wearable, of the workouts held now (by session id) and of the ended
@@ -149,7 +169,7 @@ class OpenLinkSessions(
             if (request.deviceId.isNullOrBlank()) return OpenLinkStart.Failed(OpenLinkRecordingState.REASON_NO_DEVICE)
             val held = workouts.keys.count { owners[Key(OpenLink.CAPABILITY_RECORDING, it)] == packageName }
             if (held >= MAX_WORKOUTS_PER_APP) return OpenLinkStart.Failed(OpenLinkRecordingState.REASON_BUSY)
-            workouts[sessionId] = Workout(changedAtMillis = request.startedAtMillis)
+            workouts[sessionId] = Workout(changedAtMillis = request.startedAtMillis, deviceId = request.deviceId.orEmpty(), exerciseType = request.exerciseType)
         }
         owners[key] = packageName
         begunAt[sessionId] = clock()
@@ -189,6 +209,9 @@ class OpenLinkSessions(
         if (workout.stopping) return false
         workouts[sessionId] = workout.copy(stopping = true, stoppedAtMillis = clock())
         save(sessionId)
+        // A stopped workout runs no more: its followers are done with it.
+        followers.remove(sessionId)
+        publishRunning()
         return true
     }
 
@@ -270,26 +293,59 @@ class OpenLinkSessions(
     fun owner(capability: String, sessionId: String): String? = owners[Key(capability, sessionId)]
 
     /**
-     * A workout plan with [revision] from [packageName] for [sessionId]. True if the host app is
-     * to take it: the session is the caller's recorded workout, not being stopped, and the plan
-     * is newer than the last one taken.
+     * A workout plan from [packageName]. True if the host app and the followers are to take it:
+     * its session is the caller's recorded workout, not being stopped, and the plan is newer
+     * than the last one taken.
      */
     @Synchronized
-    fun planned(sessionId: String, packageName: String, revision: Long): Boolean {
+    fun planned(plan: OpenLinkWorkoutPlan, packageName: String): Boolean {
+        val sessionId = plan.sessionId
         if (owners[Key(OpenLink.CAPABILITY_RECORDING, sessionId)] != packageName) return false
         if (workouts[sessionId]?.stopping != false) return false
-        if (revision <= (planRevisions[sessionId] ?: Long.MIN_VALUE)) return false
-        planRevisions[sessionId] = revision
+        if (plan.revision <= (plans[sessionId]?.revision ?: Long.MIN_VALUE)) return false
+        plans[sessionId] = plan
         return true
     }
 
-    /** Forgets the plans of [packageName]'s workouts (it lost the capability): their session ids. */
+    /** Forgets the plans of [packageName]'s workouts (it lost the capability): the plans dropped. */
     @Synchronized
-    fun dropPlans(packageName: String): List<String> {
-        val dropped = planRevisions.keys.filter { owners[Key(OpenLink.CAPABILITY_RECORDING, it)] == packageName }
-        dropped.forEach(planRevisions::remove)
+    fun dropPlans(packageName: String): List<OpenLinkWorkoutPlan> {
+        val dropped = plans.values.filter { owners[Key(OpenLink.CAPABILITY_RECORDING, it.sessionId)] == packageName }
+        dropped.forEach { plans.remove(it.sessionId) }
         return dropped
     }
+
+    /** The recorded workouts running now: held, and not being stopped. */
+    @Synchronized
+    fun running(): List<OpenLinkRunningWorkout> = running
+
+    /**
+     * [packageName] follows the running workout [sessionId]: what to tell it at once, or null if
+     * no such workout runs.
+     */
+    @Synchronized
+    fun follow(sessionId: String, packageName: String): Following? {
+        val workout = workouts[sessionId] ?: return null
+        if (workout.stopping) return null
+        followers.getOrPut(sessionId) { mutableSetOf() } += packageName
+        return Following(plans[sessionId], marks[sessionId])
+    }
+
+    @Synchronized
+    fun unfollow(sessionId: String, packageName: String) {
+        val following = followers[sessionId] ?: return
+        following -= packageName
+        if (following.isEmpty()) followers.remove(sessionId)
+    }
+
+    /** [packageName] follows nothing any more (it left, or lost the capability). */
+    @Synchronized
+    fun unfollowAll(packageName: String) {
+        followers.keys.toList().forEach { unfollow(it, packageName) }
+    }
+
+    @Synchronized
+    fun followersOf(sessionId: String): Set<String> = followers[sessionId]?.toSet().orEmpty()
 
     /**
      * The host app reported sets marked on the wearable. They are merged into the session's,
@@ -384,7 +440,8 @@ class OpenLinkSessions(
         owners.remove(key)
         if (key.capability != OpenLink.CAPABILITY_RECORDING) return null
         begunAt.remove(key.sessionId)
-        planRevisions.remove(key.sessionId)
+        plans.remove(key.sessionId)
+        followers.remove(key.sessionId)
         if (workouts.remove(key.sessionId) != null) storage?.remove(storageKey(key.sessionId))
         return marks.remove(key.sessionId)
     }
@@ -398,6 +455,8 @@ class OpenLinkSessions(
             listOf(
                 ACTIVE, owner, flag(workout.paused), workout.changedAtMillis.toString(), flag(workout.stopping),
                 workout.stoppedAtMillis.toString(), flag(workout.ran), begunAt[sessionId]?.toString().orEmpty(),
+                // The device id last: it is the host app's and may hold anything.
+                workout.exerciseType.toString(), workout.deviceId,
             )
                 .joinToString("\t"),
         )
@@ -427,7 +486,7 @@ class OpenLinkSessions(
         for ((storedKey, value) in stored) {
             val kept = when {
                 storedKey.startsWith(KEY_PREFIX) ->
-                    value.startsWith(ACTIVE) && loadWorkout(storedKey.removePrefix(KEY_PREFIX), value.split('\t', limit = 8))
+                    value.startsWith(ACTIVE) && loadWorkout(storedKey.removePrefix(KEY_PREFIX), value.split('\t', limit = 10))
                 storedKey.startsWith(ENDED_PREFIX) -> {
                     // The owner, a package name, holds no "/": the session id is all after the first.
                     val rest = storedKey.removePrefix(ENDED_PREFIX)
@@ -447,8 +506,8 @@ class OpenLinkSessions(
     }
 
     private fun loadWorkout(sessionId: String, fields: List<String>): Boolean {
-        // Seven fields: written before the start time was kept.
-        if (fields.size !in 7..8 || fields[1].isEmpty()) return false
+        // Seven or eight fields: written before the start time, or the device, was kept.
+        if (fields.size !in 7..10 || fields[1].isEmpty()) return false
         val changedAt = fields[3].toLongOrNull() ?: return false
         val stoppedAt = fields[5].toLongOrNull() ?: return false
         owners[Key(OpenLink.CAPABILITY_RECORDING, sessionId)] = fields[1]
@@ -459,12 +518,22 @@ class OpenLinkSessions(
             stopping = fields[4] == "1",
             stoppedAtMillis = stoppedAt,
             ran = fields[6] == "1",
+            exerciseType = fields.getOrNull(8)?.toIntOrNull() ?: 0,
+            deviceId = fields.getOrNull(9).orEmpty(),
         )
         return true
     }
 
     private fun publish() {
         _active.value = owners.map { (key, owner) -> OpenLinkActiveSession(owner, key.capability, key.sessionId) }
+        publishRunning()
+    }
+
+    private fun publishRunning() {
+        val now = workouts.filterValues { !it.stopping }.map { (sessionId, w) -> OpenLinkRunningWorkout(sessionId, w.deviceId, w.exerciseType) }
+        if (now == running) return
+        running = now
+        onWorkoutsChanged?.invoke(now)
     }
 
     companion object {

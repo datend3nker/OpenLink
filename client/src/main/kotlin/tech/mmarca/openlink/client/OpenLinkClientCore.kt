@@ -20,6 +20,7 @@ import tech.mmarca.openlink.OpenLinkRecordingMode
 import tech.mmarca.openlink.OpenLinkRecordingPhase
 import tech.mmarca.openlink.OpenLinkRecordingRequest
 import tech.mmarca.openlink.OpenLinkRecordingState
+import tech.mmarca.openlink.OpenLinkRunningWorkout
 import tech.mmarca.openlink.OpenLinkSettings
 import tech.mmarca.openlink.OpenLinkSigners
 import tech.mmarca.openlink.OpenLinkState
@@ -120,6 +121,22 @@ class OpenLinkClientCore(
      */
     val workoutResults: SharedFlow<OpenLinkWorkoutResults> = _workoutResults.asSharedFlow()
 
+    private val _workouts = MutableStateFlow<List<OpenLinkRunningWorkout>>(emptyList())
+
+    /**
+     * The recorded workouts running on the host now, of every app (version 4, capability
+     * workout.follow). Empty without the capability or on an older host.
+     */
+    val workouts: StateFlow<List<OpenLinkRunningWorkout>> = _workouts.asStateFlow()
+
+    private val _followedPlans = MutableStateFlow<Map<String, OpenLinkWorkoutPlan>>(emptyMap())
+
+    /**
+     * The plans of the workouts this app follows, by session id: the newest of each, checked.
+     * None yet: its owner has sent none. One with no exercises: its owner took it back.
+     */
+    val followedPlans: StateFlow<Map<String, OpenLinkWorkoutPlan>> = _followedPlans.asStateFlow()
+
     private val _profileExchangedAtMillis = MutableStateFlow(0L)
 
     /** When a body profile last went to the host or came from it on this run; 0 if not yet. */
@@ -157,6 +174,9 @@ class OpenLinkClientCore(
     /** The newest plan of each recorded workout the app holds, sent again after a reconnect. */
     private val plans = mutableMapOf<String, OpenLinkWorkoutPlan>()
     private var lastRevision = 0L
+
+    /** The workouts the app follows, followed again after a reconnect while they run. */
+    private val follows = linkedSetOf<String>()
 
     /** What [listener] (the binder side's stub) forwards here. */
     val events: Events = Events()
@@ -252,6 +272,22 @@ class OpenLinkClientCore(
         flushPlan(plan.sessionId)
     }
 
+    /**
+     * Follows the running workout [sessionId] of another app (version 4, capability
+     * workout.follow): its plan comes in [followedPlans], its marked sets in [workoutResults].
+     * It ends when the workout leaves [workouts], or with [unfollowWorkout].
+     */
+    fun followWorkout(sessionId: String) {
+        if (!follows.add(sessionId)) return
+        if (followAllowed()) host?.followWorkout(sessionId)
+    }
+
+    fun unfollowWorkout(sessionId: String) {
+        if (!follows.remove(sessionId)) return
+        _followedPlans.value -= sessionId
+        if (followAllowed()) host?.unfollowWorkout(sessionId)
+    }
+
     fun stopRecording(sessionId: String) {
         controls.remove(sessionId)
         plans.remove(sessionId)
@@ -313,6 +349,17 @@ class OpenLinkClientCore(
     private fun workoutAllowed(state: OpenLinkState? = state()): Boolean =
         state != null && state.protocolVersion >= OpenLink.WORKOUT_VERSION && state.has(OpenLink.CAPABILITY_WORKOUT)
 
+    private fun followAllowed(state: OpenLinkState? = state()): Boolean =
+        state != null && state.protocolVersion >= OpenLink.WORKOUT_VERSION && state.has(OpenLink.CAPABILITY_WORKOUT_FOLLOW)
+
+    /** Takes the running workouts; a followed one that left them is over for the app. */
+    private fun setWorkouts(running: List<OpenLinkRunningWorkout>) {
+        _workouts.value = running
+        val ids = running.map { it.sessionId }.toSet()
+        follows.retainAll(ids)
+        _followedPlans.value = _followedPlans.value.filterKeys { it in follows }
+    }
+
     /** Sends the plan of [sessionId] if the host has been sent the workout and takes plans. */
     private fun flushPlan(sessionId: String) {
         val plan = plans[sessionId] ?: return
@@ -371,6 +418,14 @@ class OpenLinkClientCore(
         }
         if (state.has(OpenLink.CAPABILITY_LIVE) && before?.has(OpenLink.CAPABILITY_LIVE) != true) {
             subscriptions.values.forEach(host::subscribeLive)
+        }
+        if (!followAllowed(state)) {
+            // The wishes stay for a later grant; what was shown is gone.
+            _workouts.value = emptyList()
+            _followedPlans.value = emptyMap()
+        } else if (!followAllowed(before)) {
+            setWorkouts(host.workouts.orEmpty())
+            follows.toList().forEach(host::followWorkout)
         }
     }
 
@@ -449,10 +504,24 @@ class OpenLinkClientCore(
         }
 
         fun onWorkoutResults(results: OpenLinkWorkoutResults) {
-            // Of a workout the app holds, or one that ended lately (a set marked just before).
-            if (workoutAllowed() && (results.sessionId in recordings || results.sessionId in ended)) {
-                _workoutResults.tryEmit(results.valid())
-            }
+            // Of a workout the app holds, or one that ended lately (a set marked just before), or
+            // one it follows.
+            val own = workoutAllowed() && (results.sessionId in recordings || results.sessionId in ended)
+            val followed = followAllowed() && results.sessionId in follows
+            if (own || followed) _workoutResults.tryEmit(results.valid())
+        }
+
+        fun onWorkoutsChanged(workouts: List<OpenLinkRunningWorkout>) {
+            if (followAllowed()) setWorkouts(workouts)
+        }
+
+        fun onWorkoutPlan(plan: OpenLinkWorkoutPlan) {
+            if (!followAllowed() || plan.sessionId !in follows) return
+            val valid = plan.valid() ?: return
+            val plans = _followedPlans.value
+            // The newest counts: two plans may pass each other on the way.
+            if (valid.revision <= (plans[valid.sessionId]?.revision ?: Long.MIN_VALUE)) return
+            _followedPlans.value = plans + (valid.sessionId to valid)
         }
 
         fun onSettingsChanged(settings: OpenLinkSettings) {

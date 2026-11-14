@@ -9,6 +9,7 @@ import tech.mmarca.openlink.OpenLinkRecordingRequest;
 import tech.mmarca.openlink.OpenLinkLiveSubscription;
 import tech.mmarca.openlink.OpenLinkSettings;
 import tech.mmarca.openlink.OpenLinkWorkoutPlan;
+import tech.mmarca.openlink.OpenLinkRunningWorkout;
 
 /**
  * The host's side of the channel. The caller's identity comes from the binder, never from
@@ -51,4 +52,11 @@ interface IOpenLinkHost {
     // workout, version 4. Appended last.
     /** The whole plan of the caller's RECORD session, after every change; the newest revision counts. */
     oneway void setWorkoutPlan(in OpenLinkWorkoutPlan plan);
+
+    // workout.follow, version 4. Appended last.
+    /** The recorded workouts running now, of every app; no labels. */
+    List<OpenLinkRunningWorkout> getWorkouts();
+    /** Follows a running workout: its plan and its marked sets come with the listener. */
+    oneway void followWorkout(String sessionId);
+    oneway void unfollowWorkout(String sessionId);
 }

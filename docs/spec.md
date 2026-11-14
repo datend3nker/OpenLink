@@ -142,6 +142,8 @@ The consent screen names each capability in plain words:
 | `recording` | "Start and stop a recording on your watch when it records an activity" |
 | `live` | "Receive heart rate, cadence and power from your watch while it records" |
 | `settings` | "Share your daily goals and heart rate zone limits with OpenWatch, both ways" |
+| `workout` | "Show its workout on your watch (exercise names, sets, weights) and get the sets you mark there" |
+| `workout.follow` | "See the workouts other apps started on your watch (exercise names, sets, weights) while they run" |
 
 ### What the host shows
 
@@ -178,6 +180,10 @@ interface IOpenLinkHost {
     OpenLinkSettings getSettings();
     // workout, version 4 (appended last)
     oneway void setWorkoutPlan(in OpenLinkWorkoutPlan plan);
+    // workout.follow, version 4 (appended last)
+    List<OpenLinkRunningWorkout> getWorkouts();
+    oneway void followWorkout(String sessionId);
+    oneway void unfollowWorkout(String sessionId);
 }
 
 oneway interface IOpenLinkListener {
@@ -191,7 +197,9 @@ oneway interface IOpenLinkListener {
     // version 3 (appended last), sent only to a client that negotiated version 3
     void onSettingsChanged(in OpenLinkSettings settings);              // capability settings
     // version 4 (appended last), sent only to a client that negotiated version 4
-    void onWorkoutResults(in OpenLinkWorkoutResults results);          // capability workout
+    void onWorkoutResults(in OpenLinkWorkoutResults results);          // workout, workout.follow
+    void onWorkoutsChanged(in List<OpenLinkRunningWorkout> workouts);  // capability workout.follow
+    void onWorkoutPlan(in OpenLinkWorkoutPlan plan);                   // capability workout.follow
 }
 ```
 
@@ -226,7 +234,9 @@ so an old client never crashes against a stricter host.
 
 `protocolVersion` is an integer, 4 in this version. Version 4 adds the `workout` capability,
 `setWorkoutPlan`, `onWorkoutResults` and the device features `WORKOUT_PLAN` and `WORKOUT_INPUT`
-(see The workout plan below); a side that negotiated an older version sends and accepts no plan,
+(see The workout plan below), and the `workout.follow` capability with `getWorkouts`,
+`followWorkout`, `unfollowWorkout`, `onWorkoutsChanged` and `onWorkoutPlan` (see Following a
+workout below); a side that negotiated an older version sends and accepts no plan,
 and the workout records as before. Version 3 adds the `settings` capability,
 `setSettings`, `getSettings` and `onSettingsChanged` (see Settings below); a side that
 negotiated an older version sends and accepts no settings. Version 2 adds `RECORD` mode, the `PAUSED`
@@ -319,9 +329,8 @@ What keeps the capability from becoming a way to carry anything:
 
 A client that runs a structured workout (exercises, sets, targets, weights) has the wearable
 that records it show the workout, and takes over the sets the user marks there. The client stays
-the owner: its workout is the truth, the wearable shows a copy and suggests changes. Following a
-workout from another client (a second screen) is proposed in `docs/proposals/workout-plan.md`,
-under a capability of its own, and not part of this version.
+the owner: its workout is the truth, the wearable shows a copy and suggests changes. Other
+clients may follow it (see Following a workout below).
 
 - **Its own capability, `workout`,** asked for, shown on the consent screen and revocable like
   the others. It is the one place OpenLink carries user text (the exercises' names), so it is not
@@ -372,6 +381,34 @@ under a capability of its own, and not part of this version.
   targets and labels stay in the client's own data.
 - **Never crosses:** notes, links, a workout's history, anything that names the user or another
   session, and text other than `label`.
+
+### Following a workout (version 4)
+
+A second screen: an app shows a workout another app started, with its plan and the sets marked,
+while it runs. Until now a session's events went to its owner alone; this is the one exception,
+limited to reading a recorded workout's plan and results.
+
+- **Its own capability, `workout.follow`,** apart from `workout`: an app may send its own plan
+  without seeing other apps' workouts. The consent screen says the app may see the workouts other
+  apps start, exercise names included. Without it, or below version 4, nothing crosses.
+- **The running workouts** (`getWorkouts`, then `onWorkoutsChanged` with all of them on every
+  change): the `RECORD` sessions held now and not being stopped, of every app. Each is an
+  `OpenLinkRunningWorkout`: `sessionId`, `deviceId`, `exerciseType`. No label, no owner.
+- **Following** (`followWorkout(sessionId)`): the host sends the follower the newest plan and the
+  sets marked so far at once, then every newer plan (`onWorkoutPlan`) and the results the owner
+  gets (`onWorkoutResults`). A plan with no exercises means the owner took its plan back (it lost
+  `workout`). A follow of a workout that does not run is dropped. Following ends with
+  `unfollowWorkout`, when the workout is stopped or ends (it leaves the running workouts), when
+  the follower loses the capability, and when it unbinds or dies; the client library follows
+  again after a reconnect while the workout runs, and drops a follow once its workout has left
+  the list.
+- **The owner changes nothing.** It sends its plan as before and alone controls the workout: a
+  follower cannot change the plan, pause, resume or stop. The library takes the newest plan by
+  `revision`, so two that pass each other on the way do not undo a change.
+- **Not yet: marking sets as a follower.** The proposal's `setWorkoutResults` from a follower is
+  not part of this version; a follower shows the workout and the sets marked on the wearable.
+- **Afterwards** every app sees the workout in Health Connect, without OpenLink. Weights and
+  labels stay with the owner.
 
 ### Delegated recording (version 2)
 

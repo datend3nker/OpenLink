@@ -1,10 +1,10 @@
 # Proposal: the workout plan on the wearable (version 4)
 
-Status: the plan and the results (everything but "A second screen") are built as version 4 and
-specified in `docs/spec.md`, "The workout plan"; where the two differ, the spec counts. The
-library hands a plan to the host app at once and keeps the results in memory, not in the session
-storage. "A second screen" is decided in outline (its own capability, `workout.follow`) and not
-built. It extends delegated recording (version 2) and borrows the
+Status: built as version 4 and specified in `docs/spec.md`, "The workout plan" and "Following a
+workout"; where the two differ, the spec counts. The library hands a plan to the host app at
+once and keeps plans and results in memory, not in the session storage. "A second screen" is
+built under its own capability, `workout.follow`, without a follower's `setWorkoutResults`
+(followers read only), and announces running workouts with `onWorkoutsChanged`. It extends delegated recording (version 2) and borrows the
 settings model (version 3). Asked for by LiftLog. LiftLog runs a strength workout on the phone
 and wants the watch to show it and take sets.
 
